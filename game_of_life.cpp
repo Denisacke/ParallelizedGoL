@@ -1,26 +1,30 @@
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 #define ALIVE 1
 #define DEAD 0
-#define NUM_ITERATIONS 10
+#define NUM_ITERATIONS 1
 
-int** allocate_grid(int rows, int cols);
-void free_grid(int** grid, int rows);
-void initialize_grid(int** grid, int rows, int cols);
-void print_grid(int** grid, int rows, int cols);
-void exchange_borders(int** grid, int rows, int cols, int rank, int size);
-void compute_next_state(int** grid, int** new_grid, int rows, int cols);
+int **allocate_grid(int rows, int cols);
 
-int main(int argc, char** argv) {
+void free_grid(int **grid);
+
+void initialize_grid(int **grid, int rows, int cols);
+
+void exchange_borders(int **grid, int rows, int cols, int rank, int size);
+
+void compute_next_state(int **grid, int **new_grid, int rows, int cols);
+
+int main(int argc, char **argv) {
     MPI_Init(&argc, &argv);
 
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    int rows = 20, cols = 20; // Total grid size
+    int rows = 10, cols = 10; // Total grid size
     int local_rows = rows / size; // Rows handled by each process
 
     if (rows % size != 0) {
@@ -31,18 +35,18 @@ int main(int argc, char** argv) {
     }
 
     // Allocate grid (including ghost rows)
-    int** grid = allocate_grid(local_rows + 2, cols);
-    int** new_grid = allocate_grid(local_rows + 2, cols);
+    int **grid = allocate_grid(local_rows + 2, cols);
+    int **new_grid = allocate_grid(local_rows + 2, cols);
 
-    // Initialize grid for all processes
+    srand(time(nullptr) + rank);
     initialize_grid(grid, local_rows + 2, cols);
 
-    for (int t = 0; t < NUM_ITERATIONS; t++) {
-        exchange_borders(grid, local_rows, cols, rank, size);
-        compute_next_state(grid, new_grid, local_rows, cols);
+    for (int t = 0; t <= NUM_ITERATIONS; t++) {
+        exchange_borders(grid, local_rows + 2, cols, rank, size);
+        compute_next_state(grid, new_grid, local_rows + 2, cols);
 
         // Swap grids
-        int** temp = grid;
+        int **temp = grid;
         grid = new_grid;
         new_grid = temp;
 
@@ -69,24 +73,20 @@ int main(int argc, char** argv) {
             printf("\n");
             free(gathered_grid);
         }
+
     }
 
-    if (rank == 0) {
-        printf("Final state:\n");
-        print_grid(grid + 1, local_rows, cols); // Exclude ghost rows
-    }
-
-    free_grid(grid, local_rows + 2);
-    free_grid(new_grid, local_rows + 2);
+    free_grid(grid);
+    free_grid(new_grid);
 
     MPI_Finalize();
     return 0;
 }
 
 // Allocate a 2D grid dynamically
-int** allocate_grid(int rows, int cols) {
-    int** grid = (int**)malloc(rows * sizeof(int*));
-    grid[0] = (int*)malloc(rows * cols * sizeof(int));
+int **allocate_grid(int rows, int cols) {
+    int **grid = (int **) malloc(rows * sizeof(int *));
+    grid[0] = (int *) malloc(rows * cols * sizeof(int));
     for (int i = 1; i < rows; i++) {
         grid[i] = grid[0] + i * cols;
     }
@@ -94,13 +94,13 @@ int** allocate_grid(int rows, int cols) {
 }
 
 // Free a dynamically allocated grid
-void free_grid(int** grid, int rows) {
+void free_grid(int **grid) {
     free(grid[0]);
     free(grid);
 }
 
 // Initialize the grid with random values
-void initialize_grid(int** grid, int rows, int cols) {
+void initialize_grid(int **grid, int rows, int cols) {
     for (int i = 1; i < rows - 1; i++) { // Exclude ghost rows
         for (int j = 0; j < cols; j++) {
             grid[i][j] = rand() % 2; // Randomly ALIVE or DEAD
@@ -114,53 +114,45 @@ void initialize_grid(int** grid, int rows, int cols) {
     }
 }
 
-// Print the grid (excluding ghost rows)
-void print_grid(int** grid, int rows, int cols) {
-    for (int i = 0; i < rows; i++) {
-        for (int j = 0; j < cols; j++) {
-            printf("%c", grid[i][j] == ALIVE ? 'O' : '.');
-        }
-        printf("\n");
-    }
-}
-
 // Exchange ghost rows with neighboring processes
-void exchange_borders(int** grid, int rows, int cols, int rank, int size) {
-    MPI_Status status;
+void exchange_borders(int **grid, int rows, int cols, int rank, int size) {
     int above = rank - 1;
     int below = rank + 1;
+    MPI_Request request[4];
+    MPI_Status status[4];
 
-    // Send top row and receive bottom ghost row
+    // Asynchronous send/receive
     if (below < size) {
-        MPI_Sendrecv(grid[rows - 2], cols, MPI_INT, below, 0,
-                     grid[rows - 1], cols, MPI_INT, below, 0,
-                     MPI_COMM_WORLD, &status);
+        MPI_Isend(grid[rows - 2], cols, MPI_INT, below, 0, MPI_COMM_WORLD, &request[0]);
+        MPI_Irecv(grid[rows - 1], cols, MPI_INT, below, 0, MPI_COMM_WORLD, &request[1]);
     }
 
-    // Send bottom row and receive top ghost row
     if (above >= 0) {
-        MPI_Sendrecv(grid[1], cols, MPI_INT, above, 0,
-                     grid[0], cols, MPI_INT, above, 0,
-                     MPI_COMM_WORLD, &status);
+        MPI_Isend(grid[1], cols, MPI_INT, above, 0, MPI_COMM_WORLD, &request[2]);
+        MPI_Irecv(grid[0], cols, MPI_INT, above, 0, MPI_COMM_WORLD, &request[3]);
     }
+
+    MPI_Waitall(4, request, status);
+
 }
 
-void compute_next_state(int** grid, int** new_grid, int rows, int cols) {
+void compute_next_state(int **grid, int **new_grid, int rows, int cols) {
     for (int i = 1; i < rows - 1; i++) { // Exclude ghost rows
         for (int j = 0; j < cols; j++) {
             int alive_neighbors = 0;
 
-            // Count alive neighbors
             for (int di = -1; di <= 1; di++) {
                 for (int dj = -1; dj <= 1; dj++) {
                     if (di == 0 && dj == 0) continue; // Skip self
                     int ni = i + di;
-                    int nj = (j + dj + cols) % cols;
-                    alive_neighbors += grid[ni][nj];
+                    int nj = j + dj;
+
+                    if (nj >= 0 && nj < cols) {
+                        alive_neighbors += grid[ni][nj];
+                    }
                 }
             }
 
-            // Apply Game of Life rules
             if (grid[i][j] == ALIVE) {
                 new_grid[i][j] = (alive_neighbors == 2 || alive_neighbors == 3) ? ALIVE : DEAD;
             } else {
